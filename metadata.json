@@ -1,0 +1,5 @@
+{
+  "name": "Dim Dawg AI Financial Analyzer",
+  "description": "A local-first, privacy-focused financial tool backed by Google Sheets and powered by Gemini 3.",
+  "requestFramePermissions": []
+}

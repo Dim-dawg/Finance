@@ -117,5 +117,23 @@ You need an API key to enable the AI features.
 
 ---
 
+## ✅ Roadmap / To-Do
+
+- [ ] **Multi-Currency Support:** Handle EUR, GBP, and CAD conversions automatically.
+- [ ] **Invoice Generation:** Create PDF invoices directly from income transactions.
+- [ ] **Tax Estimation:** Basic estimated tax calculation based on net profit.
+- [ ] **Receipt Scanning:** Upload images of receipts and use multimodal AI to extract data.
+- [ ] **Slack/Discord Integration:** Get weekly burn rate alerts in your team channel.
+- [ ] **Belize Compliance Module:** Automated GST (General Sales Tax) calculation and Business Tax reporting for Belizean entities.
+
+---
+
+## 🇧🇿 Legal & Jurisdiction
+
+**Governing Law:**
+This software and its financial logic are designed to comply with the financial regulations and banking laws of **Belize**. All financial modeling, tax estimations (where applicable), and data handling practices are structured to align with the *Belize Companies Act* and the *Domestic Banks and Financial Institutions Act*.
+
+---
+
 ## ⚠️ Privacy Note
 When parsing PDFs or generating forecasts, data snippets are sent to Google Gemini for processing. This data is **transient** and is not used to train models. Your financial data is otherwise stored strictly on your device or your private Google Sheet.

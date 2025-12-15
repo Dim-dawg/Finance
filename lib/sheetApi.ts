@@ -17,19 +17,29 @@ export class SheetApi {
     this.baseUrl = url ? url.trim() : '';
   }
 
+  /**
+   * Centralized request handler with logging and error normalization.
+   */
   private async request(action: string, payload: any = {}): Promise<SheetResponse> {
     if (!this.baseUrl) {
+      console.warn(`[SheetApi] Attempted ${action} without Base URL.`);
       return { success: false, error: "Backend URL is missing. Please go to Settings." };
     }
 
+    // Basic validation of URL format
     if (!this.baseUrl.includes('script.google.com')) {
       return { success: false, error: "Invalid URL. It must be a Google Apps Script Web App URL." };
     }
 
-    // Append cache buster to prevent cached responses
+    const startTime = Date.now();
+    const requestId = Math.random().toString(36).substring(7);
+    console.group(`[SheetApi] Req ${requestId}: ${action}`);
+    console.log('Payload:', payload);
+
+    // Append cache buster
     const urlWithParam = this.baseUrl.includes('?') 
-      ? `${this.baseUrl}&t=${Date.now()}` 
-      : `${this.baseUrl}?t=${Date.now()}`;
+      ? `${this.baseUrl}&t=${startTime}` 
+      : `${this.baseUrl}?t=${startTime}`;
 
     try {
       const requestBody = { 
@@ -38,11 +48,10 @@ export class SheetApi {
         sheetUrl: this.baseUrl 
       };
 
-      // Use text/plain to avoid CORS preflight (Simple Request)
       const response = await fetch(urlWithParam, {
         method: 'POST',
         redirect: 'follow',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // Avoid CORS preflight
         body: JSON.stringify(requestBody), 
       });
 
@@ -52,59 +61,66 @@ export class SheetApi {
 
       const text = await response.text();
       
-      // CRITICAL: Check if response is HTML (Google Login Page / Error Page)
+      // Check for HTML response (Google Error/Auth page)
       if (text.trim().startsWith('<')) {
-        console.error("Received HTML instead of JSON:", text.substring(0, 200));
+        console.error("Received HTML response:", text.substring(0, 100));
         return { 
           success: false, 
-          error: "Access Denied. Please ensure your Web App is deployed as 'Who has access: Anyone'." 
+          error: "Access Denied. Ensure Web App is deployed as 'Who has access: Anyone'." 
         };
       }
 
+      let data: SheetResponse;
       try {
-        const data = JSON.parse(text);
-        return data;
+        data = JSON.parse(text);
       } catch (e) {
         console.error("JSON Parse Error. Raw text:", text);
-        return { success: false, error: "Server returned invalid JSON. Check Server Logs." };
+        return { success: false, error: "Invalid server response. Check backend logs." };
       }
 
+      console.log('Response:', data);
+      console.log(`Duration: ${Date.now() - startTime}ms`);
+      
+      if (!data.success) {
+        console.warn(`[SheetApi] Backend returned error: ${data.error}`);
+      }
+      
+      return data;
+
     } catch (error: any) {
-      console.error(`[SheetAPI] Error ${action}:`, error);
+      console.error(`[SheetApi] Network/System Error:`, error);
       let msg = error.message || "Network request failed";
       if (msg.includes('Failed to fetch')) {
-        msg = "Network Error: Unable to reach Google. Check your internet or ad-blockers.";
+        msg = "Network Error: Unable to reach Google. Check internet connection.";
       }
       return { success: false, error: msg };
+    } finally {
+      console.groupEnd();
     }
   }
 
   /**
-   * Pings the backend to verify the URL is correct and accessible.
+   * Validates connection and permissions.
    */
   async healthCheck(): Promise<{ success: boolean; message?: string }> {
     if (!this.baseUrl) return { success: false, message: "URL Missing" };
     try {
-      // We use a simple GET request. The doGet in Code.gs returns a JSON status.
-      // We append a random param to bypass cache.
       const response = await fetch(`${this.baseUrl}${this.baseUrl.includes('?') ? '&' : '?'}ping=${Date.now()}`);
-      
       if (!response.ok) return { success: false, message: `HTTP ${response.status}` };
       
       const text = await response.text();
       if (text.includes("Dim Dawg Backend")) {
         return { success: true };
       } else if (text.startsWith('<')) {
-         return { success: false, message: "Auth Error: Deploy as 'Anyone'" };
+         return { success: false, message: "Permission Error: Deploy as 'Anyone'" };
       }
-      return { success: false, message: "Invalid Response" };
+      return { success: false, message: "Invalid Response Content" };
     } catch (e: any) {
-      return { success: false, message: "Connection Failed" };
+      return { success: false, message: "Unreachable" };
     }
   }
 
   async login(email: string, password: string): Promise<SheetResponse> {
-    // Normalize email to lowercase to prevent case mismatches
     return await this.request('login', { email: email.toLowerCase().trim(), password: password.trim() });
   }
 
@@ -119,10 +135,11 @@ export class SheetApi {
   // --- TRANSACTIONS ---
   async getTransactions(userId: string): Promise<Transaction[]> {
     const res = await this.request('getTransactions', { userId });
-    return res.success && res.data ? res.data : [];
+    return res.success && Array.isArray(res.data) ? res.data : [];
   }
 
   async saveTransactions(userId: string, transactions: Transaction[]): Promise<boolean> {
+    if (transactions.length === 0) return true;
     const res = await this.request('saveTransactions', { userId, transactions });
     return res.success;
   }
@@ -143,12 +160,12 @@ export class SheetApi {
   // --- RULES ---
   async getRules(userId: string): Promise<Rule[]> {
     const res = await this.request('getRules', { userId });
-    return res.success && res.data ? res.data : [];
+    return res.success && Array.isArray(res.data) ? res.data : [];
   }
 
-  async addRule(userId: string, rule: Partial<Rule>): Promise<string | null> {
+  async addRule(userId: string, rule: Partial<Rule>): Promise<boolean> {
     const res = await this.request('saveRule', { userId, ...rule });
-    return res.success ? 'success' : null;
+    return res.success;
   }
 
   async deleteRule(ruleId: string): Promise<boolean> {
@@ -159,7 +176,7 @@ export class SheetApi {
   // --- RECURRING TRANSACTIONS ---
   async getRecurringTransactions(userId: string): Promise<RecurringTransaction[]> {
     const res = await this.request('getRecurringTransactions', { userId });
-    return res.success && res.data ? res.data : [];
+    return res.success && Array.isArray(res.data) ? res.data : [];
   }
 
   async saveRecurringTransaction(userId: string, transaction: RecurringTransaction): Promise<boolean> {
@@ -175,7 +192,7 @@ export class SheetApi {
   // --- API KEYS ---
   async getApiKeys(userId: string): Promise<ApiKey[]> {
     const res = await this.request('getApiKeys', { userId });
-    return res.success && res.data ? res.data : [];
+    return res.success && Array.isArray(res.data) ? res.data : [];
   }
 
   async saveApiKey(userId: string, apiKey: ApiKey): Promise<boolean> {

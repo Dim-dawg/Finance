@@ -15,7 +15,7 @@ import { ViewState, AuthState, Transaction, Rule, AppSettings, User, FileJob, Ex
 import { STORAGE_KEYS, DEFAULT_CATEGORIES } from './constants';
 import { SheetApi } from './lib/sheetApi';
 import { GeminiService } from './lib/geminiService';
-import { Settings, RefreshCw, UploadCloud, Eye, EyeOff, AlertTriangle, CheckCircle, WifiOff, Copy, Code } from 'lucide-react';
+import { Settings, RefreshCw, UploadCloud, Eye, EyeOff, AlertTriangle, CheckCircle, WifiOff, Copy, Code, ExternalLink } from 'lucide-react';
 import { useSiteContext } from './context/SiteContext';
 
 interface AppProps {
@@ -314,6 +314,7 @@ const App: React.FC<AppProps> = ({ apiKey, initialUser, initialSheetUrl }) => {
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [isEmbedMode, setIsEmbedMode] = useState(false); 
   const [externalProduct, setExternalProduct] = useState<ExternalProduct | null>(null);
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
 
   useEffect(() => {
     setCurrentPage(view);
@@ -426,7 +427,6 @@ const App: React.FC<AppProps> = ({ apiKey, initialUser, initialSheetUrl }) => {
      return settings.sheetUrl ? 'cloud' : 'local';
   });
   const [isRegistering, setIsRegistering] = useState(false);
-  const [isResetting, setIsResetting] = useState(false);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -452,11 +452,27 @@ const App: React.FC<AppProps> = ({ apiKey, initialUser, initialSheetUrl }) => {
   useEffect(() => { localStorage.setItem(STORAGE_KEYS.RECURRING, JSON.stringify(recurringTransactions)); }, [recurringTransactions]);
   useEffect(() => { localStorage.setItem('dd_categories', JSON.stringify(categories)); }, [categories]);
 
+  // --- AUTO VALIDATE URL ON LOAD ---
+  useEffect(() => {
+    const validateBackend = async () => {
+      if (settings.sheetUrl && authState.mode === 'cloud') {
+        const api = new SheetApi(settings.sheetUrl);
+        const check = await api.healthCheck();
+        if (!check.success) {
+           console.warn(`[App] Backend Health Check Failed: ${check.message}`);
+           setSyncStatus('Backend Unreachable');
+        }
+      }
+    };
+    validateBackend();
+  }, [settings.sheetUrl, authState.mode]);
+
+
   // --- SYNC LOGIC ---
   const syncData = useCallback(async () => {
     if (!settings.sheetUrl || !authState.user || authState.mode !== 'cloud') return;
     
-    const currentUserId = authState.user.user_id || (authState.user as any).userId;
+    const currentUserId = authState.user.user_id;
     if (!currentUserId) { setSyncStatus('Error: Invalid User ID.'); return; }
 
     setIsSyncing(true);
@@ -483,8 +499,10 @@ const App: React.FC<AppProps> = ({ apiKey, initialUser, initialSheetUrl }) => {
       if (localOnlyTxs.length > 0) {
         setSyncStatus(`Syncing ${localOnlyTxs.length} items to cloud...`);
         const toPush = localOnlyTxs.map(t => ({...t, user_id: currentUserId }));
-        await api.saveTransactions(currentUserId, toPush);
-        toPush.forEach(t => mergedMap.set(t.transaction_id, t));
+        const success = await api.saveTransactions(currentUserId, toPush);
+        if (success) {
+           toPush.forEach(t => mergedMap.set(t.transaction_id, t));
+        }
       }
       const finalTransactions = Array.from(mergedMap.values()).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
       if (finalTransactions.length > 0) setTransactions(finalTransactions);
@@ -546,13 +564,6 @@ const App: React.FC<AppProps> = ({ apiKey, initialUser, initialSheetUrl }) => {
     setTimeout(() => setScriptCopied(false), 2000);
   };
 
-  const handleFactoryReset = () => {
-    if (confirm("⚠️ DANGER: This will delete ALL transaction data, settings, and rules stored on this device. This cannot be undone. Are you sure?")) {
-      localStorage.clear();
-      window.location.reload();
-    }
-  };
-
   const handleAddFiles = (files: File[]) => {
     const newJobs: FileJob[] = files.map(f => ({ id: crypto.randomUUID(), file: f, status: 'queued', addedAt: Date.now() }));
     setFileQueue(prev => [...prev, ...newJobs]);
@@ -586,13 +597,21 @@ const App: React.FC<AppProps> = ({ apiKey, initialUser, initialSheetUrl }) => {
         return;
       }
 
+      // Pre-check health before attempting login
+      const api = new SheetApi(settings.sheetUrl);
+      const health = await api.healthCheck();
+      if (!health.success) {
+         setAuthError(`Backend unreachable: ${health.message}`);
+         setAuthLoading(false);
+         return;
+      }
+
       if (!email || !password) {
          setAuthError('Please fill in email and password.');
          setAuthLoading(false);
          return;
       }
 
-      const api = new SheetApi(settings.sheetUrl);
       try {
         let res;
         if (isRegistering) {
@@ -661,113 +680,218 @@ const App: React.FC<AppProps> = ({ apiKey, initialUser, initialSheetUrl }) => {
   // --- TRANSACTION HANDLERS ---
   const handleDeleteTransaction = async (id: string) => {
     // 1. Move to deleted array (Soft Delete)
+    // For soft delete, we don't need to call backend yet, as we handle "Trash" locally until permanent delete.
+    // However, if we want Trash to be synced, we need a mechanism.
+    // The current backend doesn't support a "deleted" flag, only "deleteRow".
+    // So "Trash" is a local-only concept in this architecture unless we change backend.
+    
     const txToDelete = transactions.find(t => t.transaction_id === id);
     if (txToDelete) {
       setDeletedTransactions(prev => [...prev, txToDelete]);
     }
-    // 2. Remove from active
+    // Remove from active view immediately (Soft delete is local action)
     setTransactions(prev => prev.filter(t => t.transaction_id !== id));
-    
-    // 3. Sync Delete to Cloud immediately to keep lists clean
-    if (authState.mode === 'cloud' && settings.sheetUrl) { 
-      const api = new SheetApi(settings.sheetUrl); 
-      api.deleteTransaction(id).catch(console.error); 
-    }
     logAction(`Moved transaction to trash: ${id}`);
   };
 
   const handleRestoreTransaction = async (id: string) => {
-    // 1. Find in deleted
     const txToRestore = deletedTransactions.find(t => t.transaction_id === id);
     if (!txToRestore) return;
 
-    // 2. Add back to active
+    // Restore to active
     setTransactions(prev => [...prev, txToRestore].sort((a,b) => new Date(b.date).getTime() - new Date(a.date).getTime()));
-    
-    // 3. Remove from deleted
     setDeletedTransactions(prev => prev.filter(t => t.transaction_id !== id));
-
-    // 4. Sync Add to Cloud
-    if (authState.mode === 'cloud' && settings.sheetUrl && authState.user) {
-      const api = new SheetApi(settings.sheetUrl);
-      // Re-save it
-      api.saveTransactions(authState.user.user_id, [txToRestore]).catch(console.error);
-    }
     logAction(`Restored transaction: ${id}`);
   };
 
-  const handlePermanentDelete = (id: string) => {
+  const handlePermanentDelete = async (id: string) => {
+    if (authState.mode === 'cloud' && settings.sheetUrl) {
+        setIsSyncing(true);
+        try {
+            const api = new SheetApi(settings.sheetUrl);
+            const success = await api.deleteTransaction(id);
+            if (!success) {
+                alert("Failed to delete from Cloud. Check backend.");
+                return;
+            }
+        } catch(e) {
+            console.error(e);
+            alert("Network error deleting transaction.");
+            return;
+        } finally {
+            setIsSyncing(false);
+        }
+    }
+    // Update UI only after success (or if local)
     setDeletedTransactions(prev => prev.filter(t => t.transaction_id !== id));
-    // Cloud is already deleted from handleDeleteTransaction step
     logAction(`Permanently deleted transaction: ${id}`);
   };
 
   const handleUpdateTransaction = async (tx: Transaction) => {
+    if (authState.mode === 'cloud' && settings.sheetUrl) {
+        setIsSyncing(true);
+        try {
+            const api = new SheetApi(settings.sheetUrl);
+            const success = await api.updateTransaction(tx);
+            if (!success) {
+                 alert("Update failed on server.");
+                 return;
+            }
+        } catch(e) {
+            console.error(e);
+            alert("Network error updating transaction.");
+            return;
+        } finally {
+            setIsSyncing(false);
+        }
+    }
+    // Update local state after successful cloud update (pessimistic)
     setTransactions(prev => prev.map(t => t.transaction_id === tx.transaction_id ? tx : t));
-    if (authState.mode === 'cloud' && settings.sheetUrl) { setIsSyncing(true); try { const api = new SheetApi(settings.sheetUrl); await api.updateTransaction(tx); } finally { setIsSyncing(false); } }
   };
 
   // --- RECURRING HANDLERS ---
   const handleAddRecurring = async (item: RecurringTransaction) => {
-    setRecurringTransactions(prev => [...prev, item]);
     if (authState.mode === 'cloud' && settings.sheetUrl && authState.user) {
-       const api = new SheetApi(settings.sheetUrl);
-       await api.saveRecurringTransaction(authState.user.user_id, item);
+        setIsSyncing(true);
+        try {
+           const api = new SheetApi(settings.sheetUrl);
+           const success = await api.saveRecurringTransaction(authState.user.user_id, item);
+           if (!success) throw new Error("Backend refused save");
+        } catch(e) {
+           console.error(e);
+           alert("Failed to save recurring transaction.");
+           setIsSyncing(false);
+           return;
+        }
+        setIsSyncing(false);
     }
+    setRecurringTransactions(prev => [...prev, item]);
   };
+
   const handleRemoveRecurring = async (id: string) => {
-    setRecurringTransactions(prev => prev.filter(i => i.id !== id));
     if (authState.mode === 'cloud' && settings.sheetUrl) {
-       const api = new SheetApi(settings.sheetUrl);
-       await api.deleteRecurringTransaction(id);
+       setIsSyncing(true);
+       try {
+           const api = new SheetApi(settings.sheetUrl);
+           const success = await api.deleteRecurringTransaction(id);
+           if (!success) throw new Error("Backend delete failed");
+       } catch(e) {
+           console.error(e);
+           alert("Failed to delete recurring transaction.");
+           setIsSyncing(false);
+           return;
+       }
+       setIsSyncing(false);
     }
+    setRecurringTransactions(prev => prev.filter(i => i.id !== id));
   };
 
   // --- RULE HANDLERS ---
   const handleAddRule = async (newRule: Rule) => {
-    setRules(prev => [...prev, newRule]);
     if (authState.mode === 'cloud' && settings.sheetUrl && authState.user) {
-      const api = new SheetApi(settings.sheetUrl);
-      await api.addRule(authState.user.user_id, newRule);
+      setIsSyncing(true);
+      try {
+        const api = new SheetApi(settings.sheetUrl);
+        const success = await api.addRule(authState.user.user_id, newRule);
+        if (!success) throw new Error("Save rule failed");
+      } catch (e) {
+        console.error(e);
+        alert("Failed to save rule to cloud.");
+        setIsSyncing(false);
+        return;
+      }
+      setIsSyncing(false);
     }
+    setRules(prev => [...prev, newRule]);
   };
+
   const handleDeleteRule = async (id: string) => {
-    setRules(prev => prev.filter(r => r.rule_id !== id));
     if (authState.mode === 'cloud' && settings.sheetUrl) {
-      const api = new SheetApi(settings.sheetUrl);
-      await api.deleteRule(id);
+      setIsSyncing(true);
+      try {
+        const api = new SheetApi(settings.sheetUrl);
+        const success = await api.deleteRule(id);
+        if (!success) throw new Error("Delete rule failed");
+      } catch (e) {
+         console.error(e);
+         alert("Failed to delete rule from cloud.");
+         setIsSyncing(false);
+         return;
+      }
+      setIsSyncing(false);
     }
+    setRules(prev => prev.filter(r => r.rule_id !== id));
   };
+
   const handleAddCategory = (cat: string) => setCategories(prev => [...prev, cat]);
   const handleDeleteCategory = (cat: string) => setCategories(prev => prev.filter(c => c !== cat));
   
-  // Smarter Rule Application (Sorts by length desc so specific rules match first)
+  // Smarter Rule Application
   const handleApplyRules = async () => {
     if (rules.length === 0) return;
     setIsSyncing(true);
+    setSyncStatus("Applying rules...");
     
     // Sort rules: longer keywords first (Specificity)
     const sortedRules = [...rules].sort((a, b) => b.keyword.length - a.keyword.length);
+    const updates: Transaction[] = [];
 
     const updatedTransactions = transactions.map(t => {
       const matchingRule = sortedRules.find(r => (t.description || '').toLowerCase().includes(r.keyword.toLowerCase()));
-      // Only apply if category is different to avoid unnecessary updates
-      return matchingRule && t.category !== matchingRule.category ? { ...t, category: matchingRule.category } : t;
+      
+      if (matchingRule && t.category !== matchingRule.category) {
+         const updated = { ...t, category: matchingRule.category };
+         updates.push(updated);
+         return updated;
+      }
+      return t;
     });
+
+    if (authState.mode === 'cloud' && settings.sheetUrl && updates.length > 0) {
+        try {
+            const api = new SheetApi(settings.sheetUrl);
+            setSyncStatus(`Updating ${updates.length} items on cloud...`);
+            
+            // Backend only supports single update, so we must loop (Pessimistic but reliable)
+            // We batch them slightly to avoid timeout if possible, but one-by-one is safest given Apps Script lock
+            for (let i = 0; i < updates.length; i++) {
+                const tx = updates[i];
+                await api.updateTransaction(tx);
+                if (i % 5 === 0) setSyncStatus(`Updating... (${i+1}/${updates.length})`);
+            }
+        } catch (e) {
+            console.error("Batch update failed", e);
+            alert("Some updates failed to sync to cloud. Please check connection.");
+        }
+    }
+
     setTransactions(updatedTransactions);
     setIsSyncing(false);
+    setSyncStatus("");
   };
+
   const handleQuickRule = (tx: Transaction) => { handleAddRule({ rule_id: crypto.randomUUID(), user_id: authState.user?.user_id || 'local', keyword: tx.description, category: tx.category }); setView(ViewState.RULES); };
 
   const handleConnectToCloud = () => { if (!settings.sheetUrl) return; setAuthState(prev => { const next = { ...prev, mode: 'cloud' as const }; localStorage.setItem(STORAGE_KEYS.AUTH_MODE, 'cloud'); return next; }); };
   const handleGenerateKey = async (name: string) => {
     const newKey: ApiKey = { id: crypto.randomUUID(), name, key: `dd_sk_${Array.from(crypto.getRandomValues(new Uint8Array(24))).map(b => b.toString(16).padStart(2, '0')).join('')}`, createdAt: new Date().toISOString() };
+    
+    if (authState.mode === 'cloud' && settings.sheetUrl && authState.user) { 
+        setIsSyncing(true);
+        const api = new SheetApi(settings.sheetUrl); 
+        await api.saveApiKey(authState.user.user_id, newKey); 
+        setIsSyncing(false);
+    }
     setApiKeys(prev => [newKey, ...prev]);
-    if (authState.mode === 'cloud' && settings.sheetUrl && authState.user) { const api = new SheetApi(settings.sheetUrl); await api.saveApiKey(authState.user.user_id, newKey); }
   };
   const handleRevokeKey = async (id: string) => {
+    if (authState.mode === 'cloud' && settings.sheetUrl) { 
+        setIsSyncing(true);
+        const api = new SheetApi(settings.sheetUrl); 
+        await api.revokeApiKey(id); 
+        setIsSyncing(false);
+    }
     setApiKeys(prev => prev.filter(k => k.id !== id));
-    if (authState.mode === 'cloud' && settings.sheetUrl) { const api = new SheetApi(settings.sheetUrl); await api.revokeApiKey(id); }
   };
 
   // --- BACKGROUND FILE PROCESSOR (BATCH) ---
@@ -815,25 +939,40 @@ const App: React.FC<AppProps> = ({ apiKey, initialUser, initialSheetUrl }) => {
 
         // Apply Rules immediately to new transactions (Smart Logic)
         const sortedRules = [...rules].sort((a, b) => b.keyword.length - a.keyword.length);
-        const finalTxs = extractedTxs.map(t => {
+        const processedTxs = extractedTxs.map(t => {
            const rule = sortedRules.find(r => (t.description || '').toLowerCase().includes(r.keyword.toLowerCase()));
            return rule ? { ...t, category: rule.category } : t;
         });
 
-        // Update State
-        setTransactions(prev => [...finalTxs, ...prev]);
+        // DE-DUPLICATION LOGIC
+        // We use a signature based on date, amount, description to check against existing global transactions
+        const existingSignatures = new Set(transactionsRef.current.map(t => 
+            `${t.date}-${t.amount}-${(t.description || '').trim().toLowerCase()}`
+        ));
 
-        // Sync to Cloud
-        if (authState.mode === 'cloud' && settings.sheetUrl && authState.user) {
-            const api = new SheetApi(settings.sheetUrl);
-            api.saveTransactions(authState.user.user_id, finalTxs).catch(console.error);
+        const uniqueNewTxs = processedTxs.filter(t => {
+             const sig = `${t.date}-${t.amount}-${(t.description || '').trim().toLowerCase()}`;
+             if (existingSignatures.has(sig)) return false;
+             existingSignatures.add(sig); // Prevent duplicates within the batch itself
+             return true;
+        });
+
+        // Update State (appends ONLY new unique ones)
+        if (uniqueNewTxs.length > 0) {
+            setTransactions(prev => [...uniqueNewTxs, ...prev]);
+
+            // Sync to Cloud
+            if (authState.mode === 'cloud' && settings.sheetUrl && authState.user) {
+                const api = new SheetApi(settings.sheetUrl);
+                api.saveTransactions(authState.user.user_id, uniqueNewTxs).catch(console.error);
+            }
         }
 
         // Update Job Status
         setFileQueue(prev => prev.map(j => {
            const payload = filePayloads.find(p => p.jobId === j.id);
            if (payload) {
-              const count = finalTxs.filter(t => t.source_file === payload.filename).length;
+              const count = uniqueNewTxs.filter(t => t.source_file === payload.filename).length;
               return { ...j, status: 'completed', resultCount: count };
            }
            return j;
@@ -1059,24 +1198,64 @@ const App: React.FC<AppProps> = ({ apiKey, initialUser, initialSheetUrl }) => {
                      {connMsg && <p className={`text-xs mt-2 ${connStatus === 'success' ? 'text-green-400' : connStatus === 'error' ? 'text-red-400' : 'text-slate-400'}`}>{connMsg}</p>}
                   </div>
 
-                  <div className="bg-slate-950 p-4 rounded-lg border border-slate-800">
-                     <div className="flex justify-between items-center mb-2">
-                        <h4 className="font-semibold text-white flex items-center"><Code size={16} className="mr-2 text-yellow-500"/> Backend Script</h4>
-                        <button onClick={handleCopyScript} className="text-xs bg-slate-800 hover:bg-slate-700 text-white px-2 py-1 rounded flex items-center">
-                           {scriptCopied ? <CheckCircle size={12} className="mr-1 text-green-400"/> : <Copy size={12} className="mr-1"/>} 
-                           {scriptCopied ? 'Copied' : 'Copy Code'}
+                  <div className="bg-slate-950 p-6 rounded-lg border border-slate-800">
+                     <div className="flex justify-between items-center mb-6 border-b border-slate-800 pb-4">
+                        <h4 className="font-semibold text-white flex items-center text-lg"><Code size={20} className="mr-2 text-yellow-500"/> Backend Setup Guide</h4>
+                        <button onClick={handleCopyScript} className="text-xs bg-blue-900/30 hover:bg-blue-900/50 text-blue-300 border border-blue-500/30 px-3 py-1.5 rounded flex items-center transition-colors">
+                           {scriptCopied ? <CheckCircle size={14} className="mr-1.5 text-green-400"/> : <Copy size={14} className="mr-1.5"/>} 
+                           {scriptCopied ? 'Copied to Clipboard' : 'Copy Script Code'}
                         </button>
                      </div>
-                     <p className="text-xs text-slate-500 mb-2">
-                        Copy this code into <strong>Extensions &gt; Apps Script</strong> in your Google Sheet. Deploy as Web App (Access: Anyone).
-                     </p>
+                     
+                     <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                        <div>
+                           <h5 className="text-sm font-bold text-slate-300 mb-3 uppercase tracking-wide">Installation Steps</h5>
+                           <ol className="list-decimal list-inside text-sm text-slate-400 space-y-3 leading-relaxed">
+                              <li>Create a new <a href="https://sheets.new" target="_blank" className="text-blue-400 hover:underline inline-flex items-center">Google Sheet <ExternalLink size={12} className="ml-1"/></a>.</li>
+                              <li>Go to <strong>Extensions &gt; Apps Script</strong>.</li>
+                              <li>Paste the code into <code>Code.gs</code> (delete existing code).</li>
+                              <li>Click the <strong className="text-white">Save</strong> icon (Floppy Disk).</li>
+                              <li>Click <strong className="text-blue-400">Deploy &gt; New Deployment</strong>.</li>
+                              <li>Click the "Select type" gear icon &gt; <strong>Web App</strong>.</li>
+                              <li>Set "Execute as": <strong>Me</strong>.</li>
+                              <li>
+                                 <span className="text-red-400 font-bold bg-red-900/10 px-1 rounded">CRITICAL:</span> Set "Who has access": <strong>Anyone</strong>.
+                              </li>
+                              <li>Click <strong>Deploy</strong> and copy the "Web App URL".</li>
+                              <li>Paste the URL into the field above and click <strong>Save & Connect</strong>.</li>
+                           </ol>
+                        </div>
+                        <div className="bg-slate-900 p-4 rounded border border-slate-800 text-xs font-mono text-slate-500 overflow-y-auto max-h-[250px]">
+                           <div className="flex items-center mb-2 text-slate-400 italic">
+                              <Code size={12} className="mr-1"/> Preview of Code.gs
+                           </div>
+                           {GOOGLE_APPS_SCRIPT_CODE.substring(0, 500)}...
+                           <br/><br/>
+                           <span className="text-slate-600">// (Click "Copy Script Code" above for full source)</span>
+                        </div>
+                     </div>
                   </div>
 
                   <div className="pt-6 border-t border-slate-800">
                      <h4 className="font-bold text-red-400 mb-2 flex items-center"><AlertTriangle size={18} className="mr-2"/> Danger Zone</h4>
-                     <button onClick={handleFactoryReset} className="text-red-400 hover:text-red-300 text-sm hover:underline">
-                        Factory Reset (Clear All Local Data)
-                     </button>
+                     {!showResetConfirm ? (
+                       <button onClick={() => setShowResetConfirm(true)} className="text-red-400 hover:text-red-300 text-sm hover:underline">
+                          Factory Reset (Clear All Local Data)
+                       </button>
+                     ) : (
+                       <div className="bg-red-900/20 border border-red-500/50 rounded-lg p-4 animate-fade-in mt-2">
+                          <p className="text-white font-bold text-sm mb-1">Are you absolutely sure?</p>
+                          <p className="text-slate-300 text-xs mb-3">This action cannot be undone. All local transactions and settings will be erased.</p>
+                          <div className="flex space-x-3">
+                             <button onClick={() => setShowResetConfirm(false)} className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition-colors">
+                                Cancel
+                             </button>
+                             <button onClick={() => { localStorage.clear(); window.location.reload(); }} className="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-bold transition-colors shadow-lg">
+                                Yes, Wipe Everything
+                             </button>
+                          </div>
+                       </div>
+                     )}
                   </div>
                </div>
                

@@ -1,7 +1,7 @@
-
 import { Transaction, Rule, User, Category, ApiKey, RecurringTransaction } from '../types';
 
-interface SheetResponse {
+// Simplified response interface, as our backend will be more consistent.
+interface ApiResponse {
   success: boolean;
   error?: string;
   data?: any;
@@ -11,72 +11,42 @@ interface SheetResponse {
 }
 
 export class SheetApi {
-  private baseUrl: string;
-
-  constructor(url: string) {
-    this.baseUrl = url ? url.trim() : '';
-  }
+  // The backend proxy endpoint. All requests go through our own serverless function.
+  private backendUrl = '/api/sheets-proxy';
 
   /**
-   * Centralized request handler with logging and error normalization.
+   * Centralized request handler for our backend proxy.
    */
-  private async request(action: string, payload: any = {}): Promise<SheetResponse> {
-    if (!this.baseUrl) {
-      console.warn(`[SheetApi] Attempted ${action} without Base URL.`);
-      return { success: false, error: "Backend URL is missing. Please go to Settings." };
-    }
-
-    // Basic validation of URL format
-    if (!this.baseUrl.includes('script.google.com')) {
-      return { success: false, error: "Invalid URL. It must be a Google Apps Script Web App URL." };
-    }
-
+  private async request(action: string, payload: any = {}): Promise<ApiResponse> {
     const startTime = Date.now();
     const requestId = Math.random().toString(36).substring(7);
     console.group(`[SheetApi] Req ${requestId}: ${action}`);
     console.log('Payload:', payload);
 
-    // Append cache buster
-    const urlWithParam = this.baseUrl.includes('?') 
-      ? `${this.baseUrl}&t=${startTime}` 
-      : `${this.baseUrl}?t=${startTime}`;
-
     try {
-      const requestBody = { 
-        ...payload, 
-        action,
-        sheetUrl: this.baseUrl 
-      };
+      const requestBody = { action, ...payload };
 
-      const response = await fetch(urlWithParam, {
+      const response = await fetch(this.backendUrl, {
         method: 'POST',
-        redirect: 'follow',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // Avoid CORS preflight
-        body: JSON.stringify(requestBody), 
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(requestBody),
       });
 
       if (!response.ok) {
-        throw new Error(`HTTP Error: ${response.status} ${response.statusText}`);
+        // Our backend should send a JSON error, but handle cases where it doesn't.
+        const errorText = await response.text();
+        console.error(`[SheetApi] HTTP Error: ${response.status}`, errorText);
+        try {
+          const errorJson = JSON.parse(errorText);
+          throw new Error(errorJson.error || `HTTP Error: ${response.status}`);
+        } catch {
+          throw new Error(errorText || `HTTP Error: ${response.status}`);
+        }
       }
 
-      const text = await response.text();
-      
-      // Check for HTML response (Google Error/Auth page)
-      if (text.trim().startsWith('<')) {
-        console.error("Received HTML response:", text.substring(0, 100));
-        return { 
-          success: false, 
-          error: "Access Denied. Ensure Web App is deployed as 'Who has access: Anyone'." 
-        };
-      }
-
-      let data: SheetResponse;
-      try {
-        data = JSON.parse(text);
-      } catch (e) {
-        console.error("JSON Parse Error. Raw text:", text);
-        return { success: false, error: "Invalid server response. Check backend logs." };
-      }
+      const data: ApiResponse = await response.json();
 
       console.log('Response:', data);
       console.log(`Duration: ${Date.now() - startTime}ms`);
@@ -89,46 +59,22 @@ export class SheetApi {
 
     } catch (error: any) {
       console.error(`[SheetApi] Network/System Error:`, error);
-      let msg = error.message || "Network request failed";
-      if (msg.includes('Failed to fetch')) {
-        msg = "Network Error: Unable to reach Google. Check internet connection.";
-      }
-      return { success: false, error: msg };
+      return { success: false, error: error.message || "A network error occurred." };
     } finally {
       console.groupEnd();
     }
   }
 
-  /**
-   * Validates connection and permissions.
-   */
-  async healthCheck(): Promise<{ success: boolean; message?: string }> {
-    if (!this.baseUrl) return { success: false, message: "URL Missing" };
-    try {
-      const response = await fetch(`${this.baseUrl}${this.baseUrl.includes('?') ? '&' : '?'}ping=${Date.now()}`);
-      if (!response.ok) return { success: false, message: `HTTP ${response.status}` };
-      
-      const text = await response.text();
-      if (text.includes("Dim Dawg Backend")) {
-        return { success: true };
-      } else if (text.startsWith('<')) {
-         return { success: false, message: "Permission Error: Deploy as 'Anyone'" };
-      }
-      return { success: false, message: "Invalid Response Content" };
-    } catch (e: any) {
-      return { success: false, message: "Unreachable" };
-    }
-  }
-
-  async login(email: string, password: string): Promise<SheetResponse> {
+  // --- AUTH ---
+  async login(email: string, password: string): Promise<ApiResponse> {
     return await this.request('login', { email: email.toLowerCase().trim(), password: password.trim() });
   }
 
-  async register(email: string, password: string, name: string): Promise<SheetResponse> {
+  async register(email: string, password: string, name: string): Promise<ApiResponse> {
     return await this.request('register', { email: email.toLowerCase().trim(), password: password.trim(), name });
   }
 
-  async resetPassword(email: string): Promise<SheetResponse> {
+  async resetPassword(email: string): Promise<ApiResponse> {
     return await this.request('resetPassword', { email: email.toLowerCase().trim() });
   }
 

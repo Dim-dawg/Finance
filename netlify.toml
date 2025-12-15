@@ -1,0 +1,9 @@
+[build]
+  command = "npm run build --workspace=frontend"
+  publish = "frontend/dist"
+  functions = "functions"
+
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/api/:splat"
+  status = 200

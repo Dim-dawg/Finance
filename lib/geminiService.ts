@@ -56,23 +56,21 @@ export class GeminiService {
   }
 
   /**
-   * Parses multiple Bank Statements in a single batch to save API calls
+   * Parses a single Bank Statement file
    */
-  async batchParseBankStatements(
-    files: { data: string; mimeType: string; filename: string }[], 
+  async parseBankStatement(
+    file: { data: string; mimeType: string; filename: string }, 
     userId: string
   ): Promise<Transaction[]> {
     const categoriesList = DEFAULT_CATEGORIES.join(", ");
     
-    // Construct the prompt with multiple parts
     const parts: any[] = [
       { text: `
-        Analyze the provided bank statement files (${files.length} files in total) for a Technology Services Company.
-        Extract all financial transactions into a SINGLE JSON array.
+        Analyze the provided bank statement file ("${file.filename}") for a Technology Services Company.
+        Extract all financial transactions into a JSON array.
         
         DATA SOURCE GUIDANCE:
-        - I have attached ${files.length} files. Each file represents a corporate bank statement or card statement.
-        - You must process ALL files.
+        - Input is a single corporate bank statement or card statement (PDF or CSV).
         
         EXTRACTION INSTRUCTIONS:
         1. IGNORE non-transaction rows (headers, footers, balances, account summaries).
@@ -85,24 +83,21 @@ export class GeminiService {
         4. CATEGORY: 
            - Map to standard business categories if possible: ${categoriesList}.
            - Distinguish between "Software Subscriptions" (e.g. Github, Jira), "Cloud Infrastructure" (AWS, Azure), and "General Admin".
-           - Recognize "Payroll" or "Contractor Fees" based on names or recurring patterns.
+           - Recognize "Payroll" or "Contractor Fees".
            - Otherwise create a descriptive Title Case category.
         5. SOURCE_FILE: 
-           - **CRITICAL**: For each transaction, set the "source_file" field to the exact filename of the file it originated from.
+           - Set "source_file" to "${file.filename}".
         
         OUTPUT SCHEMA:
         Return a JSON array of objects.
       `}
     ];
 
-    files.forEach((f, index) => {
-      parts.push({ text: `\n\n--- START OF FILE ${index + 1}: ${f.filename} ---\n` });
-      if (f.mimeType === 'application/pdf') {
-        parts.push({ inlineData: { mimeType: f.mimeType, data: f.data } });
-      } else {
-        parts.push({ text: f.data });
-      }
-    });
+    if (file.mimeType === 'application/pdf') {
+      parts.push({ inlineData: { mimeType: file.mimeType, data: file.data } });
+    } else {
+      parts.push({ text: file.data });
+    }
 
     return this.withRetry(async () => {
       const response = await this.client.models.generateContent({
@@ -140,16 +135,9 @@ export class GeminiService {
         amount: Math.abs(t.amount),
         category: t.category || 'Uncategorized',
         type: t.type || (t.amount < 0 ? 'expense' : 'income'),
-        source_file: t.source_file || 'Batch Upload'
+        source_file: t.source_file || file.filename
       }));
     });
-  }
-
-  /**
-   * Legacy single file parse (proxies to batch)
-   */
-  async parseBankStatement(data: string, mimeType: string, userId: string): Promise<Transaction[]> {
-    return this.batchParseBankStatements([{ data, mimeType, filename: 'Single Upload' }], userId);
   }
 
   /**

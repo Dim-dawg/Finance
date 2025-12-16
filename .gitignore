@@ -22,10 +22,3 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
-
-# Dependency directories for monorepo
-/frontend/node_modules
-/functions/node_modules
-
-# Functions build output
-/functions/.dist
